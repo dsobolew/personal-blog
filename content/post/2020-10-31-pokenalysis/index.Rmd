@@ -1,0 +1,334 @@
+---
+title: Pokenalysis of Pokemon Go Movesets
+author: ''
+date: '2020-10-31'
+slug: pokenalysis
+categories: []
+tags:
+  - Pokemon
+  - EDA
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, dpi = 180, fig.align  = "center", cache = TRUE, out.width = '100%')
+
+
+
+library(tidyverse)
+library(httr)
+library(DT)
+
+theme_set(theme_light())
+
+# data gathering and cleaning ---------------------------------------------
+
+pvpoke_res <- GET(url = "https://pvpoke.com/data/gamemaster.json?v=1.17.7.3")  %>%
+  content()
+
+
+pokemon <- tibble(data = pvpoke_res %>%
+         pluck("pokemon")) %>%
+  unnest_wider(col = data) %>%
+  unnest_wider(baseStats) %>%
+  unnest_longer(fastMoves) %>% 
+  unnest_longer(chargedMoves) %>%
+  unnest_wider(types) %>%
+  rename(Type1 = `...1`,
+         Type2 = `...2`)
+
+
+moves <- tibble(data = pvpoke_res %>%
+                  pluck("moves")) %>%
+  unnest_wider(col = data)
+
+fast_moves <- moves %>%
+  filter(energyGain > 0) %>%
+  mutate(seconds = cooldown / 1000,
+         dps = power / seconds,
+         eps = energyGain / seconds,
+         attack_product = dps * eps,
+         attack_sum = dps + eps,
+         short_name = if_else(str_count(name, '\\w+') > 1, paste0(str_sub(word(name,1),1,1),". ",word(name,2)),name)) 
+
+charge_moves <- moves %>%
+  filter(energyGain == 0) %>% 
+  mutate(ppe = power / energy,
+         short_name = if_else(str_count(name, '\\w+') > 1 & name != "V-Create", paste0(str_sub(word(name,1),1,1),". ",word(name,2)),name)) 
+
+
+# fast move eda -----------------------------------------------------------
+poke_colors = c("normal" = "#A8A77A","fire" = "#EE8130","water" = "#6390F0",
+                "electric" = "#F7D02C","grass" = "#7AC74C","ice" = "#96D9D6",
+                "fighting" = "#C22E28","poison" = "#A33EA1","ground" = "#E2BF65",
+                "flying" = "#A98FF3","psychic" = "#F95587","bug" = "#A6B91A",
+                "rock" = "#B6A136","ghost" = "#735797","dragon" = "#6F35FC",
+                "dark" = "#705746","steel" = "#B7B7CE","fairy" = "#D685AD")
+
+
+
+```
+
+## Pokemon Go Moveset Data
+
+I started playing Pokemon Go this year and became particularly interested in Go Battle League where you battle other players in the game. Each player chooses three pokemon to battle and each of those have a limit of one fast move and two charged moves. A fast moves deals damage to the opposing player's pokemon while also building energy towards a charged move. Once enough energy is available, you can unleash a charged move which deals large amounts of damage to the opposing player and depletes your built up energy. Each of these moves has a typing (grass, water, fire, etc), builds energy at different rates, requires different amount of energy to use, and deals different amounts of damage. I decided to scrape data related to fast and charged moves from [pvpoke](www.pvpoke.com) to be able to better look at how these moves compare to one another. 
+
+### Fast Moves
+
+First we will look at fast moves which have 3 main components: enegery gain, damage output, and a cooldown period. A cooldown period just means how long the move takes to complete and can be used to calculate energy per second (eps) and damage per second (eps) for a given move. Let's take a look at the distribution of dps and eps among all fastmoves in the game. Colors have been assigned based on the typing of the move. 
+
+```{r}
+
+fast_moves %>%
+  pivot_longer(dps:eps, names_to = "benefit", values_to = "stat") %>%
+  ggplot(aes(x = stat, fill = type)) +
+  geom_histogram() +
+  scale_fill_manual(values = poke_colors) +
+  guides(fill = FALSE) +
+  facet_wrap(~benefit) +
+  labs(title = "What is the distribution of DPS and EPS?", x = "")
+
+
+```
+
+It looks like energy gained per second is more distributed among fast moves than DPS. There appears to be a default DPS of 6 for most moves with very distinct clusters of moves higher than that. Let take a look at those clusters and the eps associated with them.
+
+```{r}
+
+fast_moves %>%
+  top_n(dps, n=10) %>%
+  pivot_longer(dps:eps, names_to = "benefit", values_to = "stat") %>%
+  mutate(benefit = if_else(benefit == "eps","Energy Per Second","Damage Per Second"),
+         benefit = fct_relevel(benefit,"Damage Per Second","Energy Per Second"),
+         name = tidytext::reorder_within(name, stat, benefit)) %>%
+  ggplot(aes(x = stat, y = name, color = type)) +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0,xend = stat, y = name, yend = name), size = 2) +
+  scale_color_manual(values = poke_colors) +
+  tidytext::scale_y_reordered() +
+  guides(color = FALSE) +
+  facet_wrap(~ benefit, scales = "free_y") +
+  labs(title = "DPS and EPS Rankings of Top DPS Moves", 
+       x = "", y = "")
+
+
+```
+
+Razor Leaf and Charm have by far the highest DPS' in the game. The next 12 closest moves all deal 8 DPS and can be directly compared based on their energy gain. Counter is considered one of the best fast moves in the game and it shows when looking at its EPS compared to similar damage output moves. Gust, Dragon Breath, and Confusion all fall in the next best grouping of high damage output fast moves above waterfall and smack down. After that we have the various fang fast moves and finally bite and scratch. Bite shares the terrible energy generation of charm and razor leaf with not nearly the high damage output benefits. 
+
+Lets do the same view with top EPS moves. 
+
+```{r}
+
+fast_moves %>%
+  top_n(eps, n=10) %>%
+  pivot_longer(dps:eps, names_to = "benefit", values_to = "stat") %>%
+  mutate(benefit = if_else(benefit == "eps","Energy Per Second","Damage Per Second"),
+         benefit = fct_relevel(benefit,"Energy Per Second","Damage Per Second"),
+         name = tidytext::reorder_within(name, stat, benefit)) %>%
+  ggplot(aes(x = stat, y = name, color = type)) +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0,xend = stat, y = name, yend = name), size = 2) +
+  scale_color_manual(values = poke_colors) +
+  tidytext::scale_y_reordered() +
+  guides(color = FALSE) +
+  facet_wrap(~ benefit, scales = "free_y") +
+  labs(title = "DPS and EPS Rankings of Top EPS Moves", 
+       x = "", y = "")
+
+```
+
+The top 3 groupings of EPS moves, from lock on to bullet seed, are pretty straight forward trade offs. The relationship between energy gains and lack of damage output is perfectly symetrical. The next 9 top moves all share the same eps but have varying dps. Shadow Claw is regarded as a top fast move and it's easy to see why when looking at its damage output. I was surprised Volt Switch is basically a Shadow Claw clone in terms of EPS/DPS, I haven't seen it talked about much before. Powder Snow and Vine Whip are also very good energy focused fast moves.
+
+Let's compare the DPS and EPS of fast moves within their same typing.
+
+```{r fig.height = 12, fig.width= 8}
+
+fast_moves %>%
+  ggplot(aes(x = dps, y = eps, color = type)) +
+  geom_point(alpha = .5) +
+  ggrepel::geom_text_repel(aes(label = short_name)) +
+  scale_color_manual(values = poke_colors) +
+  facet_wrap(~type, ncol = 3) +
+  guides(color = FALSE) +
+  theme_light() +
+  coord_fixed() +
+  labs(title = "EPS vs DPS by Type")
+
+```
+
+Here you can really differentiate viable fast moves from bad ones. You can also see which typings are lacking fast move diversity. Fairy typing only has one move and ground has three. Pychic and electric look to have the best mix of options with top ranked DPS and EPS moves available. 
+
+In an attempt to come up with an aggregate score to directly compare all moves I added DPS and EPS together in the below graph. Any move not on this list probably shouldn't be considered for Go Battle League. Notable inclusions include Bullet Punch and Poinson Jab which weren't on our top DPS or EPS lists but sneak into the EPS + DPS list. This means they are well balanced between engery generation and damage output. 
+
+```{r fig.height = 8}
+
+fast_moves %>%
+  top_n(attack_sum, n = 24) %>%
+  mutate(name = fct_reorder(name, attack_sum)) %>%
+  ggplot(aes(x = attack_sum, y = name, col = type)) +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0,xend = attack_sum, y = name, yend = name), size = 2) +
+  guides(color = FALSE) +
+  scale_color_manual(values = poke_colors) +
+  labs(title = "Top 25 Fast Moves by EPS + DPS", x = "EPS + DPS", y = "")
+
+```
+
+The same graph broken out by typing shows the most viable moves for each category. Anthing not on this list shouldn't be considered for PVP.
+
+```{r fig.height=7}
+
+fast_moves %>%
+  top_n(attack_sum, n = 25) %>%
+  add_count(type) %>%
+  mutate(name = fct_reorder(name, attack_sum),
+         type = fct_rev(fct_reorder(type, n))) %>%
+  ggplot(aes(x = attack_sum, y = name, color = type)) +
+  geom_point(size = 2) +
+  geom_segment(aes(x = 0,xend = attack_sum, y = name, yend = name), size = 1) +
+  guides(color = FALSE) +
+  scale_color_manual(values = poke_colors) +
+  facet_wrap(~type, scales = "free_y", ncol = 3) +
+  labs(title = "Top 25 Fast Moves by EPS + DPS", x = "EPS + DPS", y = "")
+```
+
+Here is how all fast moves look when plotted on the same DPS x EPS graph. It's a little crowded but there still some interesting insights. Volt Switch, Shadow claw, and Coutner stand out as the best all around fast moves in the game. I didn't realize Thunder Shock was on par with Mud Shot as one of the better EPS moves in the game. On the other side, Wing Attack looks underwhelming in particular with similarities to Sucker Punch, Karate Chop, and Quick Attack which I have never seen used before. 
+
+```{r fig.heaight = 8, fig.width=10}
+
+fast_moves %>%
+  ggplot(aes(x = dps, y = eps, color = type)) +
+  geom_jitter(alpha = .5, size = 2, width = 0.01, height = 0.08) +
+  ggrepel::geom_text_repel(aes(label = if_else(attack_sum > 11.9, short_name, NULL))) +
+  #ggrepel::geom_text_repel(aes(label = short_name)) +
+  scale_color_manual(values = poke_colors) +
+  guides(color = FALSE) +
+  theme_minimal() +
+  labs(title = "Which Fast Moves Are Best?",
+       subtitle = "Only moves with EPS + DPS >= 12 are labelled",
+       x = "Damage Per Second", y = "Energy Per Second") +
+  coord_fixed()
+
+```
+
+### Charge Moves
+
+Let switch gears and look at charge moves. These are somewhat simpler than fast moves with an enegy requirement and a power level that indicates how much damage they do. Some moves also have the ability to boost or deplete your Pokemon or the opponents attack or defense. For the purposes of this analysis we will ignore buff and debuff charge moves.
+
+We can divide the power level of a move by the energy requirements to get a measure of efficiency for a given move. The results shows up the damage output per unit of energy expended. V-Create is the most efficient charge move in the game and available only to Victini. Most of the top efficiency moves are either community day exclusive moves, debuff the Pokemon who uses them, or only available to limited edition Pokemon. The moves that surprised me as being extrememly efficient are Superpower, Leaf Blade, and Avalance.
+
+```{r fig.height=8}
+
+charge_moves %>%
+  mutate(name = fct_reorder(name,ppe)) %>%
+  top_n(ppe,n = 40) %>%
+  ggplot(aes(x = ppe, y = name, color = type)) +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0, xend = ppe, y = name, yend = name), size = 2) +
+  scale_color_manual(values = poke_colors) +
+  guides(color = FALSE) +
+  theme_minimal() +
+  labs(title = "Top 40 Most Efficient Charge Moves", x = "Damage Per Energy", y = "")
+
+
+```
+
+Here is the same graph faceted by move type. When looked at this way it is easy to tell that fighting and grass charge moves reign supreme with many more top efficiency options compared to other typings. 
+
+```{r fig.width=10}
+
+charge_moves %>%
+  mutate(name = fct_reorder(name,ppe)) %>%
+  top_n(ppe,n = 40) %>%
+  add_count(type) %>%
+  mutate(type = fct_rev(fct_reorder(type, n))) %>%
+  ggplot(aes(x = ppe, y = name, color = type)) +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0, xend = ppe, y = name, yend = name), size = 2) +
+  scale_color_manual(values = poke_colors) +
+  facet_wrap(~type, scales = "free_y") +
+  guides(color = F) +
+  labs(title = "Top 40 Most Efficient Charge Moves by Type", x = "Power Per Energy", y = "")
+
+
+```
+
+When plotting energy required and power output on a graph it is easier to see where moves fall in relation to each other. The black line indicates a 1 to 1 correlation between energy required and power output. Most of the moves below this line provide a buff to the user or debuff to the opponent which justifies their terrible efficiency. To me, Brave Bird and Avalanche are surprises for having higher than expected efficiency. 
+
+```{r}
+
+moves %>%
+  filter(energyGain == 0) %>% 
+  mutate(ppe = power / energy,
+         short_name = if_else(str_count(name, '\\w+') > 1 & name != "V-Create", paste0(str_sub(word(name,1),1,1),". ",word(name,2)),name)) %>%
+  ggplot(aes(x = energy, y = power, col = type)) +
+  geom_jitter(size = 2, alpha = .4, width = .08) +
+  geom_abline() +
+  scale_color_manual(values = poke_colors) +
+  ggrepel::geom_text_repel(aes(label = if_else(ppe < .75 | ppe > 1.9,short_name,NULL))) +
+  guides(col = FALSE) +
+  labs(title = "Which Charge Moves are Most and Least Efficient?") 
+
+```
+
+## What Pokemon Have the Best Moves
+
+Below are all Pokemon in the game filtered to different combinations of EPS, DPE, and charge move efficiency. There might be some interesting PVP picks in these lists that you don't see too often! To me, Jynx stands out as a having an excellent moveset for a Pokemon that I have never seen used in PVP. There is another component of overall attack, defense, and stamina stats that play into a Pokemon's PVP ability that would also need to be considered. 
+
+### Top DPS Pokemon
+
+The below list is filtered to Pokemon that have a fast move ranked in the top three DPS-wise and also have a cheap charge move (less than 40 energy required) that can be reached despite poor energy generation. 
+
+```{r}
+
+top_fast_eps <- fast_moves %>% top_n(eps, n = 10) %>% pull(moveId)
+
+top_fast_dps <- fast_moves %>% top_n(dps, n = 3) %>% pull(moveId)
+
+top_fast_sum <- fast_moves %>% top_n(attack_sum, n = 10) %>% pull(moveId)
+
+top_charge_cheap <- charge_moves %>% filter(energy < 40) %>%  pull(moveId)
+
+top_charge_eff <- charge_moves %>%  top_n(ppe,n = 19) %>%  pull(moveId)
+
+top_dps_pokemon <- pokemon %>%
+  filter(dex != 235,
+         fastMoves %in% top_fast_dps & chargedMoves %in% top_charge_cheap) %>%
+  select(speciesName,Type1,Type2,atk, def, hp, fastMoves, chargedMoves)
+
+
+
+
+
+DT::datatable(top_dps_pokemon, rownames = F)
+```
+
+### Top EPS Pokemon
+
+The below Pokemon are those that have a fast move EPS ranking in the top 10 and a charge move efficiency ranking in the top 15.
+
+```{r}
+top_eps_pokemon <- pokemon %>%
+  filter(dex != 235,
+         fastMoves %in% top_fast_eps & chargedMoves %in% top_charge_eff) %>%
+  select(speciesName,Type1,Type2,atk, def, hp, fastMoves, chargedMoves)
+
+DT::datatable(top_eps_pokemon, rownames = F)
+```
+
+### Top Sum Attack Pokemon
+
+The below Pokemon have a EPS + DPS fast move in the top 10 ranking and also have a charge move efficiency ranking in the top 15.
+
+
+```{r}
+
+top_sum_pokemon <- pokemon %>%
+  filter(dex != 235,
+         fastMoves %in% top_fast_sum & chargedMoves %in% top_charge_eff) %>%
+  select(speciesName,Type1,Type2,atk, def, hp, fastMoves, chargedMoves)
+
+DT::datatable(top_sum_pokemon, rownames = F)
+
+```
+

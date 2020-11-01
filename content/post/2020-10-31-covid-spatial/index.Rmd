@@ -1,0 +1,529 @@
+---
+title: Finding COVID Hot Spots with Spatial Autocorrelation Tests
+author: Dennis Sobolewski
+date: '2020-05-08'
+slug: covid-spatial
+categories: []
+tags:
+  - spatial
+  - COVID
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(fig.retina = 3, warning = FALSE, message = FALSE, echo = FALSE, fig.align = "center")
+
+
+
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(viridis)
+
+census_api_key("ea68882061725e028d0ce5eb114fd34509f0c772")
+
+zip_pop <- get_acs(geography = "zcta",
+                   variables = "B01003_001",
+                   year =  2017,
+                   geometry = T)
+
+
+##Philadelphia COVID
+covid_raw <- read_csv(here::here("data","covid-spatial","covid_cases_by_zip.csv"))
+phila_covid <- covid_raw %>%
+  mutate(zip_code = as.character(zip_code)) %>%
+  inner_join(zip_pop, by = c("zip_code"="GEOID")) %>%
+  select(covid_status,count,zip_code,estimate,geometry) %>%
+  mutate(zip_code = factor(zip_code)) %>%
+  filter(covid_status == "POS") %>%
+  rename(zip = zip_code,pop = estimate) %>%
+  mutate(cases_per_cap = (count/pop) * 1000) %>%
+  select(-covid_status) %>%
+  rename(cases = count)
+  
+phila_covid_sf <- phila_covid %>%
+  st_sf() %>%
+  st_transform(26918)
+
+phila_covid_sf %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap)) +
+  scale_fill_gradient(low = "#FFF5F0" , high = "#A50F15", name = "Cases Per 1000")
+
+##Chicago COVID
+chi_covid <- read_csv(here::here("data","covid-spatial","chi_covid.csv")) %>%
+  mutate(zip = factor(Zip)) %>%
+  rename(cases = Cases, pop = Pop) %>%
+  select(-Zip,-Tested, -pop)
+
+chi_covid_sf <- chi_covid %>%
+  mutate(zip = as.character(zip)) %>%
+  inner_join(zip_pop, by = c("zip"="GEOID")) %>%
+  select(-NAME,-variable,-moe,) %>%
+  rename(pop = estimate) %>%
+  mutate(cases_per_cap = (cases/pop) * 1000) %>%
+  st_sf()
+
+chi_covid_sf %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap)) +
+  scale_fill_gradient(low = "#FFF5F0" , high = "#A50F15", name = "Cases Per 1000")
+
+## SF COVID
+sf_covid <- read_csv(here::here("data","covid-spatial","sf_covid.csv")) %>%
+  mutate(zip = as.character(zip)) %>%
+  filter(cases > 0) %>%
+  select(-pop)
+
+sf_covid_sf <- sf_covid %>%
+  inner_join(zip_pop, by = c("zip"="GEOID")) %>%
+  select(-NAME,-variable,-moe) %>%
+  rename(pop = estimate) %>%
+  mutate(cases_per_cap = (cases/pop) * 1000) %>%
+  st_sf()
+
+sf_covid_sf %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap)) +
+  scale_fill_gradient(low = "#FFF5F0" , high = "#A50F15", name = "Cases Per 1000")
+
+library(spdep)
+
+## Autocorrelation tests for phia
+phila_sp <- as(phila_covid_sf, "Spatial")
+
+phila_nb <- poly2nb(phila_sp, queen = T, row.names = phila_sp$zip)
+
+coords <- coordinates(phila_sp)
+
+plot(phila_sp)
+plot(phila_nb, coords = coords, add = T, col = "#F78764")
+
+## EBI Morans I
+set.seed(1988)
+phila_moran_mc <- EBImoran.mc(n = phila_sp$cases, x = phila_sp$pop, listw = nb2listw(phila_nb, style = "W"), nsim = 9999)
+phila_moran_mc
+plot(phila_moran_mc)
+
+## local morans I
+phila_lc_moran <- localmoran(phila_sp$cases_per_cap, listw = nb2listw(phila_nb, style = "W"), p.adjust.method = "bonferroni",alternative = "two.sided")
+
+rownames(phila_lc_moran)
+
+
+phila_lc_moran_tidy <- phila_lc_moran %>% 
+  as_tibble() %>%
+  bind_cols(zip = rownames(phila_lc_moran)) %>% 
+  rename(p_value = `Pr(z != 0)`, morans_i = Ii, z_score = Z.Ii) %>%
+  select(zip, morans_i, z_score, p_value) %>%
+  mutate(morans_i = as.numeric(round(morans_i,3)),
+         z_score = as.numeric(round(z_score,3)),
+         p_value = as.numeric(round(p_value,3)),
+         lag_cases_per_cap = round(lag.listw(var = phila_sp$cases_per_cap, x =  nb2listw(phila_nb, style = "W")),3),
+         lag_mean = round(mean(lag.listw(var = phila_sp$cases_per_cap, x =  nb2listw(phila_nb, style = "W"))),3)
+         ) %>% 
+  arrange(p_value)
+
+moran.plot(phila_sp$cases_per_cap, listw = nb2listw(phila_nb, style = "W"))
+
+phila_morans_stage <- phila_covid_sf %>%
+  inner_join(phila_lc_moran_tidy, by = c("zip"="zip")) %>%
+  mutate(quad = case_when(
+           cases_per_cap < lag_mean & lag_cases_per_cap < lag_mean ~ "Low-Low",
+           cases_per_cap < lag_mean & lag_cases_per_cap >= lag_mean ~ "Low-High",
+           cases_per_cap >= lag_mean & lag_cases_per_cap < lag_mean ~ "High-Low",
+           cases_per_cap >= lag_mean & lag_cases_per_cap >= lag_mean ~ "High-High"
+         ))
+
+ggplot() +
+  geom_sf(data = phila_morans_stage) +
+  geom_sf(data = phila_morans_stage %>% filter(p_value <= .8), aes(fill = quad)) +
+  labs(title = "Significant COVID-19 Clustering", x = "", y = "", fill = "") +
+  scale_fill_manual(values = c("Low-Low"="#4DAF4A" ,"Low-High"="#377EB8","High-Low"="#FF7F00","High-High"="#E41A1C")) 
+##Functional Programming version
+
+sf_plot <- function(data, loc) {
+data %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap), color = NA) +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  scale_fill_viridis_c(name = "Cases Per 1000") +
+  labs(title = paste0(loc," COVID-19 Cases by Zipcode"))  
+}
+
+global_morans_plot <- function(data, loc){
+  
+  tibble::enframe(data$res) %>%
+    ggplot(aes(x = value)) +
+    geom_line(stat = "density") +
+    geom_vline(xintercept = data$statistic, col = "red") +
+    annotate(geom = "text",x = .25, y = 1.5, label = paste0("P-Value: ",data$p.value)) +
+    labs(title = paste0("Density Plot of Permutation Outcomes: ",loc),
+         subtitle = "Monte-Carlo simulation of Empirical Bayes Index (mean subtracted)",
+         x = "Test Statistic", 
+         y = "Density")
+  
+}
+
+local_morans_tidy <- function(lm, sp, sf){
+  
+lm %>%
+    as_tibble() %>%
+    bind_cols(zip = rownames(lm)) %>%
+    rename(p_value = `Pr(z != 0)`, morans_i = Ii, z_score = Z.Ii) %>%
+    select(zip, morans_i, z_score, p_value) %>%
+    mutate(morans_i = as.numeric(round(morans_i,3)),
+           z_score = as.numeric(round(z_score,3)),
+           p_value = as.numeric(round(p_value,3))) %>%
+    inner_join(sf, by = c("zip"="zip")) %>%
+    mutate(lag_cases_per_cap = spdep::lag.listw(var = sp$cases_per_cap, x = spdep::nb2listw(spdep::poly2nb(sp,queen = T))),
+           lag_mean = mean(lag_cases_per_cap),
+           quad = case_when(
+             cases_per_cap < lag_mean & lag_cases_per_cap < lag_mean ~ "Low-Low",
+             cases_per_cap < lag_mean & lag_cases_per_cap >= lag_mean ~ "Low-High",
+             cases_per_cap >= lag_mean & lag_cases_per_cap < lag_mean ~ "High-Low",
+             cases_per_cap >= lag_mean & lag_cases_per_cap >= lag_mean ~ "High-High"
+           ))
+  
+}
+
+
+
+
+local_morans_plots <- function(lm_tidied, loc){
+  
+  ggplot() +
+    geom_sf(data = sf::st_as_sf(lm_tidied)) +
+    geom_sf(data = sf::st_as_sf(lm_tidied) %>% filter(p_value <= .1), aes(fill = quad)) +
+    theme_minimal() +
+    scale_fill_manual(values = c("Low-Low"="#4DAF4A" ,"Low-High"="#377EB8","High-Low"="#FF7F00","High-High"="#E41A1C")) +
+    labs(title = paste0(loc," Significant COVID-19 Clustering"), x = "", y = "", fill = "")
+  
+  
+}
+
+covid_tibble <- tibble(
+  location = c("San Francisco", "Philadelphia","Chicago"),
+  covid_sf = list(sf_covid_sf,
+                  phila_covid_sf, 
+                  chi_covid_sf)
+)
+
+morans_results <- covid_tibble %>%
+  ##perform global morans I calculation with MC simulations
+  mutate(
+    covid_map = map2(covid_sf,location,sf_plot),
+    covid_sp = map(covid_sf, ~as(., "Spatial")),    ##create sp object
+    global_morans = map(covid_sp, ~ spdep::EBImoran.mc(n = .$cases,
+                                                       x = .$pop,
+                                                       listw = spdep::nb2listw(spdep::poly2nb(.,queen = T, row.names = .$zip)),
+                                                       nsim = 9999)),     ##run global morans I test
+    global_morans_tidied = map(global_morans, broom::tidy),    ##Create output plots
+    global_moran_plots = map2(global_morans,location,global_morans_plot)) %>%   #perform local morans I calculations
+ ##Perform local morans I calculations
+  mutate(
+    local_morans = map(covid_sp, ~ spdep::localmoran(x = .$cases_per_cap,
+                                                     listw = spdep::nb2listw(spdep::poly2nb(.,queen = T, row.names = .$zip)),
+                                                     p.adjust.method = "bonferroni",
+                                                     alternative = "two.sided")),    ##run local morans I 
+    local_morans_tidied = pmap(list(local_morans, covid_sp, covid_sf), local_morans_tidy),    ##tidy the local morans I output
+    local_morans_plots = map2(local_morans_tidied,location,local_morans_plots)    ##Create output plots
+         )
+```
+
+COVID-19 data analyses are all the rage at the moment, with COVID datasets being made publicly available at the city, state, and national level. It's an awesome example of how open data can lead to a better understanding of the world around us. And, the best part is, much of the actual analysis is being done for free! I decided to take a stab it and contribute to the public COVID discorse with my own analysis below.
+
+Talk about COVID-19 "hot spots" is frequent in the news, often referring to NYC since it has the most COVID-19 cases of any city in the US. Beyond looking at simple COVID case tallies, it is not clear how these hot spots are being determined. How do they determine that one area has a statistically significant higher number of cases compared to another? Factors such as population and the COVID rates of locations directly next to an area all affect how significance is determined within COVID case data. Enter Moran's I, a measure of spatial autocorrelation that can be used to test for clustering, or dispersion, of an outcome on a map. I will show you how to perform and interpret a Moran's I test by applying it to real COVID data for a selection of US cities.
+
+## Data Sources
+
+For each area you want to test for spatial autocorrelation you will need three main pieces of information.
+
+1. Total COVID cases
+2. Estimated population
+3. Geometry of the area
+
+### COVID Cases
+
+The most granular datasets I could find for COVID data has cases tallied at the zipcode level for certain cities and states. [Here](https://dph.illinois.gov/covid19/covid19-statistics) is an example for the state of Illinois. Unfortunately I did not find a central repository or API that allows you to easily retrieve this data for multiple areas. Instead it appears a city or state will release the data on only their own site, meaning I will need to aggregate the data from multiple sources. For this blog I manually downloaded COVID case data by zipcode for Philadelphia, Chicago, and San Francisco
+
+### Population and Geometry
+
+Finding population and case data was easy thanks to the publicly available Census API and the `tidycensus` R package. The [Census API](https://www.census.gov/data/developers/guidance/api-user-guide.html) is pretty amazing, with thousands of different statistics available at multiple geographic levels. To make things easier, the [`tidycensus`](https://github.com/walkerke/tidycensus) package is a convenient wrapper for this API that makes pulling data a breeze. `Tidycensus` can automatically pull the geometry of the area your statistics represent for plotting and analysis. Adding the geometry to the returned data converts it to an `sf` object that can be easily visualized using `ggplot2`. Here is all the code you need to create a heatmap of household income in the US by county.
+
+```{r income, include=TRUE, echo = TRUE}
+
+us_county_income <- get_acs(geography = "county", variables = "B19013_001", 
+                            shift_geo = TRUE, geometry = TRUE)
+ggplot(us_county_income) + 
+  geom_sf(aes(fill = estimate), color = NA) + 
+  coord_sf(datum = NA) + 
+  theme_minimal() + 
+  scale_fill_viridis_c(labels = scales::dollar_format())
+
+```
+
+For our anaylsis I pulled the total population of each zipcode in the US, with its geometry, and did an inner join with my COVID datasets. I end up with a seperate `sf` object for Philadelpia, San Francisco, and Chicago.
+
+```{r sf_obj, include=TRUE, echo = TRUE}
+head(phila_covid_sf)
+```
+
+## Moran's I
+
+A Moran's I test results in a p-value, Moran's I index, and z-score that can be interpreted as follows:
+<br>
+
+| Moran's I Output     | Interpretation |
+| ---- | ----------- |
+| The p-value is not statistically significant    | You cannot reject the null hypothesis. It is quite possible that the spatial distribution of feature values is the result of random spatial processes. The observed spatial pattern of feature values could very well be one of many, many possible version of complete spatial randomness.       |
+| The p-value is statistically significant, and the z-score/Moran's I index is positive.   | You may reject the null hypothesis. The spatial distribution of high values and/or low values in the dataset is more spatially clustered than would be expected if underlying spatial processes were random.        |
+| The p-value is statistically significant, and the z-score/Moran's I index is negative   | You may reject the null hypothesis. The spatial distribution of high values and/or low values in the dataset is more spatially dispersed than would be expected if underlying spatial processes were random. A dispersed spatial pattern often reflects some type of competative process- a feature with a high value repels other features of high values; similarly, a feature with low value repels other features with low values.        |
+
+Furthermore there is a global and local version of the Moran's I test. A global Moran's I test produces one set of test statistics that indicates the level of clustering and dispersion in the data as a whole. A local Moran's I test will produce a set of test statistics for each area grouping specified in the dataset (in this case zip codes) that tell you whether the measurement feature is statistically higher or lower in that area. 
+
+## Philadelphia Example 
+
+I will start with looking at COVID case numbers in Philadelphia. Combining population and zipcode shapefiles from the Census API with COIVD totals scraped from the city's data portal allows us to create the following cloropleth.
+
+```{r phila_geo, include=TRUE, echo = FALSE}
+phila_covid_sf %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap), color = NA) +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  scale_fill_viridis_c(name = "Cases Per 1000") +
+  labs(title = "Philadelphia COVID-19 Cases Per Capita by Zipcode")
+```
+
+<br>
+
+Based on this graph, would you say there is significant COVID outbreak clusters within Philadelphia? The brightest yellow zipcode certainly looks like a hot spot but is the difference statistically significant? Cloropleth maps such as this are extremely popular, and often showcased by healthcare organizations I work with as examples of their BI capabilities. These visuals look beautiful, but drawing conclusions from them with the naked eye can be difficult or, in some cases, downright deceiving. We can take the guesswork out of interpreting a visual like this with Moran's I.
+
+### Global Moran's I
+
+We will use the [`spdep`](https://github.com/r-spatial/spdep) package in R to help perform the Moran's I test. I prefer working with `sf` objects in R, which is a newer way to store spatial data-structures that adheres to tidy principals, but in order or take advantage of the robust spatial tests available in `spdep` we must use `sp` objects instead. To perform these tests I will convert my `sf` objects to `sp`, then tidy the results on the back end using the `broom` package. 
+
+In order to calculate Moran's I the spdep function needs to know which zipcodes are close to or far away from each other. Feeding an `sp` object to the `poly2nb()` function will build a neighbors list based on regions sharing the same boundary. Below visually shows the relationships this function is producing.
+
+```{r phila_queen, include=TRUE, echo = TRUE}
+library(spdep)
+## convert philly sf object to sp
+phila_sp <- as(phila_covid_sf, "Spatial")
+## Create list of neighbors
+phila_nb <- poly2nb(phila_sp, queen = T, row.names = phila_sp$zip)
+coords <- coordinates(phila_sp)
+##Visualize neighbor relationships
+plot(phila_sp)
+plot(phila_nb, coords = coords, add = T, col = "#F78764")
+```
+
+We are now ready to perform the Moran's I test for spatial autocorrelation. I utilize the `EBImoran.mc()` function since we are working about COVID rates based on the population of a specific zipcode. This function also automatically performs Monte Carlo simulations for us to compare our observed test statistic against. We are required to add the number of COVID cases and population for a zipcode, as well ad a listw object which a weighted list representing the neighborhood relationships we calculated earlier. 
+
+```{r phila_mgl, include=TRUE, echo = TRUE}
+## EBI Morans I
+set.seed(1988)
+phila_moran_mc <- EBImoran.mc(n = phila_sp$cases, 
+                              x = phila_sp$pop, 
+                              ## convert neighbors list to a listw object
+                              listw = nb2listw(phila_nb, style = "W"), 
+                              nsim = 9999)
+```
+
+The tidied output of our test shows a significant p-value of .0289 and positive Moran's I test statistic of .162. This indicates that there is significant clustering of COVID cases in Philadelphia based on the COVID data we have. A density plot of the Monte Carlo permutation outcomes futher demonstrates how likely our observed test statistic is. 
+
+```{r phila_mgl2, include=TRUE, echo = FALSE}
+broom::tidy(phila_moran_mc)
+plot(phila_moran_mc)
+```
+
+### Local Moran's I
+
+Now that we know there is COVID clustering in Philadelphia, lets run a Local Moran's I test to further investigate. The local version of this test operates much the same as our previous example, except more work is needed to tidy the output since we are generating a greater number of test statistics. There is no "EBI" version of the Local Moran's test so I fed the COVID per capita rates directly to the `localmoran()` function.
+
+```{r phila_mlc,  eval=FALSE, echo = TRUE}
+phila_lc_moran <- localmoran(phila_sp$cases_per_cap,
+                              ## listw object of neighbors list
+                             listw = nb2listw(phila_nb, style = "W"),
+                             p.adjust.method = "bonferroni",
+                             alternative = "two.sided")
+
+
+phila_lc_moran_tidy <- phila_lc_moran %>% 
+  as_tibble() %>%
+  bind_cols(zip = rownames(phila_lc_moran)) %>% 
+  rename(p_value = `Pr(z != 0)`, morans_i = Ii, z_score = Z.Ii) %>%
+  select(zip, morans_i, z_score, p_value) %>%
+  mutate(morans_i = as.numeric(round(morans_i,3)),
+         z_score = as.numeric(round(z_score,3)),
+         p_value = as.numeric(round(p_value,3)),
+         lag_cases_per_cap = round(lag.listw(var = phila_sp$cases_per_cap, x =  nb2listw(phila_nb, style = "W")),3),
+         lag_mean = round(mean(lag.listw(var = phila_sp$cases_per_cap, x =  nb2listw(phila_nb, style = "W"))),3)
+         ) %>% 
+  arrange(p_value)
+
+```
+
+First 6 results from our Local Moran's test
+
+```{r phila_ml_results,  include=TRUE, echo = TRUE}
+head(phila_lc_moran_tidy)
+```
+
+There is a built in `moran.plot` function in `spdep` to visualize how our zipcodes compare to each other. This plots a zipcode's COVID cases per capita against the weighted per capita rates of the zipcodes around it. The zipcodes that are highlighted are those that deviate the most from other zipcodes in terms of COVID rates.
+
+```{r phila_mlc_plot, include=TRUE, echo = FALSE}
+moran.plot(phila_sp$cases_per_cap, listw = nb2listw(phila_nb, style = "W"))
+```
+
+When tidying our test output I calculated the spatially lagged cases per capita (aka weighted cases per capita of neighboring zipcodes) for each zipcode and the mean spatially lagged cases per capita of all zipcodes. We can use these values to determine if a zipcode falls within one of the below categories:
+
+* __Low-Low__ - The area has a low number of cases and is surrounded by other areas with low case totals.
+* __Low-High__ - The area has a low number of cases and is surrounded by other areas with high case totals.
+* __High-Low__ - The area has a high number of cases and is surrounded by other areas with low case totals. 
+* __High-High__ - The are has a high number of cases and is surrounded by other areas with high case totals.
+
+Here is my visualization staging code that combined the Local Moran's I results to the Philadelphia `sf` object and calculates which category a zipcode falls into. 
+
+```{r eval=FALSE, echo = TRUE}
+phila_morans_stage <- phila_covid_sf %>%
+  inner_join(phila_lc_moran_tidy, by = c("zip"="zip")) %>%
+  mutate(quad = case_when(
+           cases_per_cap < lag_mean & lag_cases_per_cap < lag_mean ~ "Low-Low",
+           cases_per_cap < lag_mean & lag_cases_per_cap >= lag_mean ~ "Low-High",
+           cases_per_cap >= lag_mean & lag_cases_per_cap < lag_mean ~ "High-Low",
+           cases_per_cap >= lag_mean & lag_cases_per_cap >= lag_mean ~ "High-High"
+         ))
+```
+
+The below graph shows Philadelphia and the zipcodes with a significant result from Local Moran's I. I used a high p-value to demonstrate how a visualization would look utilizing the different color coded categories we discussed. This allows us to quickly see the zipcodes with significant p-values and how they compare to their neighbors.
+
+```{r phila_mlc_plot_sf, include=TRUE, echo = FALSE}
+ggplot() +
+  geom_sf(data = phila_morans_stage) +
+  geom_sf(data = phila_morans_stage %>% filter(p_value <= .8), aes(fill = quad)) +
+  labs(title = "Significant COVID-19 Clustering", x = "", y = "", fill = "") +
+  scale_fill_manual(values = c("Low-Low"="#4DAF4A" ,"Low-High"="#377EB8","High-Low"="#FF7F00","High-High"="#E41A1C")) 
+```
+
+
+## Functional Programming For Many Locations
+
+If you can run an analysis once, then you can create functions and utilize `purrr` to run it many times. I decided to pull data from 3 different cities, Chicago, Philadelphia, and San Francisco, and run the same analysis above on all of them. My code for automating this process for many different locations can be found at the bottom.
+
+Here are the popular cloropleth graphs for each location showing the COVID cases per capita of zipcodes. Which city has the most clustering of COVID cases? Let's find out!
+
+
+```{r covid_plot, include=TRUE, echo = FALSE, results='hide'}
+morans_results$covid_map
+```
+
+Our Global Moran's I test results show all cities have significant clustering of COVID cases. Chicago takes the crown as having the most statistically significant clustering with San Francisco being a close second. 
+
+```{r morans_gl_res, include=TRUE, echo = FALSE}
+tibble(city = c("San Francisco", "Philadelphia","Chicago")) %>%
+  bind_cols(bind_rows(morans_results$global_morans_tidied))
+```
+
+```{r morans_gl, include=TRUE, echo = FALSE, results='hide'}
+morans_results$global_moran_plots
+```
+
+Our Local Moran plots show that San Francisco's clustering mostly consists of high COVID density areas surrounding each other on the East side of the city. Philadelphia's only significant clustering is a zipcode with an unusually low number of cases on the West side of the city. Chicago is the tale of two cities, with the lakefront downtown area having a significant clustering of low COVID zipcodes and the West side seeing high clustered zipcodes. 
+
+```{r morans_local, include=TRUE, echo = FALSE, results='hide'}
+morans_results$local_morans_plots
+```
+
+## Caveats and Considerations
+
+Moran's I is a great way to statistically prove clustering or dispersion of a spatial features that the naked eye might not find. However, there are major caveats and considerations when performing such a test. In the COVID case, the number of tests being performed in each zipcode obviously will have an affect on outcomes. In a perfect analysis we would have appropriate sampling from each zipcode to help validate our results. Also, the areas that you wish to compare will affect outcomes. Zipcodes are not standard shapes or sizes that perfectly divide a city based on population. Both of these factors need to be taken into consideration when performing and interpreting a Moran's I test.
+
+### Funcational Code 
+
+```{r functional, eval=FALSE, echo = TRUE}
+##Functional Programming version
+sf_plot <- function(data, loc) {
+data %>%
+  ggplot() +
+  geom_sf(aes(fill = cases_per_cap)) +
+  scale_fill_gradient(low = "#FFF5F0" , high = "#A50F15", name = "Cases Per 1000") +
+  labs(title = paste0(loc," COVID-19 Cases by Zipcode"))  
+}
+#function to create global moran density plots
+global_morans_plot <- function(data, loc){
+  
+  tibble::enframe(data$res) %>%
+    ggplot(aes(x = value)) +
+    geom_line(stat = "density") +
+    geom_vline(xintercept = data$statistic, col = "red") +
+    annotate(geom = "text",x = .25, y = 1.5, label = paste0("P-Value: ",data$p.value)) +
+    labs(title = paste0("Density Plot of Permutation Outcomes: ",loc),
+         subtitle = "Monte-Carlo simulation of Empirical Bayes Index (mean subtracted)",
+         x = "Test Statistic", 
+         y = "Density")
+  
+}
+#function to create tidy local morans tibble
+local_morans_tidy <- function(lm, sp, sf){
+  
+lm %>%
+    as_tibble() %>%
+    bind_cols(zip = rownames(lm)) %>%
+    rename(p_value = `Pr(z != 0)`, morans_i = Ii, z_score = Z.Ii) %>%
+    select(zip, morans_i, z_score, p_value) %>%
+    mutate(morans_i = as.numeric(round(morans_i,3)),
+           z_score = as.numeric(round(z_score,3)),
+           p_value = as.numeric(round(p_value,3))) %>%
+    inner_join(sf, by = c("zip"="zip")) %>%
+    mutate(lag_cases_per_cap = spdep::lag.listw(var = sp$cases_per_cap, x = spdep::nb2listw(spdep::poly2nb(sp,queen = T))),
+           lag_mean = mean(lag_cases_per_cap),
+           quad = case_when(
+             cases_per_cap < lag_mean & lag_cases_per_cap < lag_mean ~ "Low-Low",
+             cases_per_cap < lag_mean & lag_cases_per_cap >= lag_mean ~ "Low-High",
+             cases_per_cap >= lag_mean & lag_cases_per_cap < lag_mean ~ "High-Low",
+             cases_per_cap >= lag_mean & lag_cases_per_cap >= lag_mean ~ "High-High"
+           ))
+  
+}
+## Function to create local morans plots
+local_morans_plots <- function(lm_tidied, loc){
+  
+  ggplot() +
+    geom_sf(data = sf::st_as_sf(lm_tidied)) +
+    geom_sf(data = sf::st_as_sf(lm_tidied) %>% filter(p_value <= .1), aes(fill = quad)) +
+    scale_fill_manual(values = c("Low-Low"="#4DAF4A" ,"Low-High"="#377EB8","High-Low"="#FF7F00","High-High"="#E41A1C")) +
+    labs(title = paste0(loc," Significant COVID-19 Clustering"), x = "", y = "", fill = "")
+  
+  
+}
+#sombine sf objects into a tibble with nested lists
+covid_tibble <- tibble(
+  location = c("San Francisco", "Philadelphia","Chicago"),
+  covid_sf = list(sf_covid_sf,
+                  phila_covid_sf, 
+                  chi_covid_sf)
+)
+morans_results <- covid_tibble %>%
+  ##perform global morans I calculation with MC simulations
+  mutate(
+    covid_map = map2(covid_sf,location,sf_plot),
+    covid_sp = map(covid_sf, ~as(., "Spatial")),    ##create sp object
+    global_morans = map(covid_sp, ~ spdep::EBImoran.mc(n = .$cases,
+                                                            x = .$pop,
+                                                            listw = spdep::nb2listw(spdep::poly2nb(.,queen = T, row.names = .$zip)),
+                                                            nsim = 9999)),     ##run global morans I test
+    global_morans_tidied = map(global_morans, broom::tidy),    ##Create output plots
+    global_moran_plots = map2(global_morans,location,global_morans_plot)) %>%   #perform local morans I calculations
+ ##Perform local morans I calculations
+  mutate(
+    local_morans = map(covid_sp, ~ spdep::localmoran(x = .$cases_per_cap,
+                                                          listw = spdep::nb2listw(spdep::poly2nb(.,queen = T, row.names = .$zip)),
+                                                          p.adjust.method = "bonferroni")),    ##run local morans I 
+    local_morans_tidied = pmap(list(local_morans, covid_sp, covid_sf), local_morans_tidy),    ##tidy the local morans I output
+    local_morans_plots = map2(local_morans_tidied,location,local_morans_plots)    ##Create output plots
+         )
+```
