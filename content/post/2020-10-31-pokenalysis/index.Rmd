@@ -1,5 +1,5 @@
 ---
-title: Pokenalysis of Pokemon Go Movesets
+title: Pokénalysis of Pokémon Go Movesets
 author: ''
 date: '2020-10-31'
 slug: pokenalysis
@@ -70,7 +70,7 @@ poke_colors = c("normal" = "#A8A77A","fire" = "#EE8130","water" = "#6390F0",
 
 ## Pokemon Go Moveset Data
 
-I started playing Pokemon Go this year and became particularly interested in Go Battle League where you battle other players in the game. Each player chooses three pokemon to battle, each with a limit of one fast move and two charged moves. A fast move deals damage to the opposing player's pokemon while also building energy towards a charged move. Once enough energy is available, you can unleash a charged move that deals large amounts of damage to the opposing player and depletes your built-up energy. Each of these moves has a typing (grass, water, fire, etc), builds energy at different rates, requires a different amount of energy to use, and inflicts different amounts of damage. I decided to scrape data related to fast and charged moves from [pvpoke](www.pvpoke.com) to be able to better look at how these moves compare to one another. 
+I started playing Pokémon Go this year and became particularly interested in Go Battle League where you battle other players in the game. Each player chooses three Pokémon to battle, each with a limit of one fast move and two charged moves. A fast move deals damage to the opposing player's Pokémon while also building energy towards a charged move. Once enough energy is available, you can unleash a charged move that deals large amounts of damage to the opposing player and depletes your built-up energy. Each of these moves has a typing (grass, water, fire, etc), builds energy at different rates, requires a different amount of energy to use, and inflicts different amounts of damage. I decided to scrape data related to fast and charged moves from [pvpoke](www.pvpoke.com) to be able to better look at how these moves compare to one another. 
 
 ### Fast Moves
 
@@ -271,13 +271,13 @@ moves %>%
 
 ```
 
-## What Pokemon Have the Best Moves
+## What Pokémon Have the Best Moves
 
-Below are all Pokemon in the game filtered to different combinations of EPS, DPE, and charge move efficiency. There might be some interesting PVP picks in these lists that you don't often see! To me, Jynx stands out as having an excellent set of moves for a Pokemon that I have never seen used in PVP. Other game statistics are important for a Pokemon's viability but Jynx could be a spicy PVP pick.
+Below are all Pokémon in the game filtered to different combinations of EPS, DPE, and charge move efficiency. There might be some interesting PVP picks in these lists that you don't often see! To me, Jynx stands out as having an excellent set of moves for a Pokemon that I have never seen used in PVP. Other game statistics are important for a Pokemon's viability but Jynx could be a spicy PVP pick.
 
-### Top DPS Pokemon
+### Top DPS Pokémon
 
-The below list is filtered to Pokemon that have a fast move with a top 3 DPS ranking and a cheap charge move (less than 40 energy required) that can be reached despite poor energy generation. 
+The below list is filtered to Pokémon that have a fast move with a top 3 DPS ranking and a cheap charge move (less than 40 energy required) that can be reached despite poor energy generation. 
 
 ```{r}
 
@@ -303,9 +303,9 @@ top_dps_pokemon <- pokemon %>%
 DT::datatable(top_dps_pokemon, rownames = F)
 ```
 
-### Top EPS Pokemon
+### Top EPS Pokémon
 
-The below Pokemon are those that have a fast move EPS ranking in the top 10 and a charge move efficiency ranking in the top 15.
+The below Pokémon are those that have a fast move EPS ranking in the top 10 and a charge move efficiency ranking in the top 15.
 
 ```{r}
 top_eps_pokemon <- pokemon %>%
@@ -316,9 +316,9 @@ top_eps_pokemon <- pokemon %>%
 DT::datatable(top_eps_pokemon, rownames = F)
 ```
 
-### Top Sum Attack Pokemon
+### Top Sum Attack Pokémon
 
-The below Pokemon have an EPS + DPS fast move in the top 10 rankings and also have a charge move efficiency ranking in the top 15.
+The below Pokémon have an EPS + DPS fast move in the top 10 rankings and also have a charge move efficiency ranking in the top 15.
 
 
 ```{r}
